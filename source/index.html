@@ -28,9 +28,15 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .default .logo { display: none; }
 .default .target { display: flex; opacity: 1; }
 .default .toolbar { display: flex; }
+.default .toolbar-right { display: flex; }
 .toolbar { display: flex; align-items: center; position: absolute; bottom: 10px; left: 10px; padding: 0; margin: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; }
+.toolbar-right { display: none; align-items: center; position: absolute; bottom: 10px; right: 10px; padding: 0; margin: 0; user-select: none; -webkit-user-select: none; -moz-user-select: none; gap: 1px; }
 .toolbar button:focus { outline: 0; }
+.toolbar-right button:focus { outline: 0; }
 .toolbar-button { background: None; border-radius: 6px; border: 0; margin: 0; margin-right: 1px; padding: 0; fill: None; stroke: #777; cursor: pointer; width: 32px; height: 32px; user-select: none; }
+.toolbar-button.active { background: rgba(0,0,0,0.12); }
+.toolbar-button.active .stroke { stroke: #000000; }
+.toolbar-button.active .fill { fill: #000000; }
 .toolbar-path { display: flex; align-items: center; }
 .toolbar-select { background: transparent; position: relative; width: 170px; margin: 4px 4px 4px 4px; }
 .toolbar-select select { width: 100%; appearance: none; -webkit-appearance: none; -moz-appearance: none; font-family: inherit; font-size: 12px; line-height: 16px; border: 1px solid; padding: 3px 18px 3px 10px; border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; }
@@ -90,6 +96,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .alert { background-color: #ececec; color: #242424; }
 .alert .target { display: none; opacity: 0; }
 .alert .toolbar { display: none; opacity: 0; }
+.alert .toolbar-right { display: none; opacity: 0; }
 .alert .menu { display: none; opacity: 0; }
 .alert .logo { display: none; opacity: 0; }
 .alert .message { display: flex; opacity: 1; }
@@ -97,6 +104,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .alert .message-button { display: inline; opacity: 1; }
 .about { overflow: hidden; }
 .about .toolbar { display: none; }
+.about .toolbar-right { display: none; }
 .about .logo { display: block; background-color: #ececec; color: #666666; }
 .about .logo-message { display: block; top: 132px; font-size: 14px; }
 .about .logo-github { display: block; top: 340px; width: 48px; height: 48px; }
@@ -140,6 +148,7 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .welcome.spinner .target { display: flex; opacity: 0; }
 .welcome .notification .logo-name { display: none; }
 .welcome .toolbar { display: none; }
+.welcome .toolbar-right { display: none; }
 @media (prefers-color-scheme: dark) {
 :root { color-scheme: dark; }
 .default { background-color: #404040; }
@@ -166,6 +175,9 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
 .toolbar-icon .fill { fill: #aaaaaa; }
 .toolbar-icon:hover .stroke { stroke: #dfdfdf; }
 .toolbar-icon:hover .fill { fill: #dfdfdf; }
+.toolbar-button.active { background: rgba(255,255,255,0.15); }
+.toolbar-button.active .stroke { stroke: #dfdfdf; }
+.toolbar-button.active .fill { fill: #dfdfdf; }
 .toolbar-path-back-button { background: #aaaaaa; border-color: #aaaaaa; color: #333333; }
 .toolbar-path-back-button:hover { background: #dfdfdf; border-color: #dfdfdf; }
 .toolbar-path-name-button { background: #aaaaaa ; border-color: #aaaaaa; color: #404040; }
@@ -407,6 +419,42 @@ button { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI"
             &#x276E;
         </button>
     </div>
+</div>
+<div id="toolbar-right" class="toolbar-right">
+    <button id="canvas-drag-button" class="toolbar-button active" title="Canvas Drag Mode">
+        <svg class="toolbar-icon" viewBox="0 0 100 100">
+            <path class="border" d="M50 20 L50 80 M20 50 L80 50" stroke-width="8" stroke-linecap="round" stroke="#fff"/>
+            <path class="border" d="M50 20 L40 32 M50 20 L60 32" stroke-width="8" stroke-linecap="round" stroke="#fff"/>
+            <path class="border" d="M50 80 L40 68 M50 80 L60 68" stroke-width="8" stroke-linecap="round" stroke="#fff"/>
+            <path class="border" d="M20 50 L32 40 M20 50 L32 60" stroke-width="8" stroke-linecap="round" stroke="#fff"/>
+            <path class="border" d="M80 50 L68 40 M80 50 L68 60" stroke-width="8" stroke-linecap="round" stroke="#fff"/>
+            <path class="stroke" d="M50 20 L50 80 M20 50 L80 50" stroke-width="4" stroke-linecap="round"/>
+            <path class="stroke" d="M50 20 L40 32 M50 20 L60 32" stroke-width="4" stroke-linecap="round"/>
+            <path class="stroke" d="M50 80 L40 68 M50 80 L60 68" stroke-width="4" stroke-linecap="round"/>
+            <path class="stroke" d="M20 50 L32 40 M20 50 L32 60" stroke-width="4" stroke-linecap="round"/>
+            <path class="stroke" d="M80 50 L68 40 M80 50 L68 60" stroke-width="4" stroke-linecap="round"/>
+        </svg>
+    </button>
+    <button id="node-drag-button" class="toolbar-button" title="Node Drag Mode">
+        <svg class="toolbar-icon" viewBox="0 0 100 100">
+            <rect class="border" x="25" y="25" width="50" height="50" rx="8" ry="8" stroke-width="8" stroke="#fff"/>
+            <path class="border" d="M50 10 L50 25 M50 75 L50 90" stroke-width="8" stroke-linecap="round" stroke="#fff"/>
+            <path class="border" d="M50 10 L42 20 M50 10 L58 20" stroke-width="8" stroke-linecap="round" stroke="#fff"/>
+            <path class="border" d="M50 90 L42 80 M50 90 L58 80" stroke-width="8" stroke-linecap="round" stroke="#fff"/>
+            <rect class="stroke" x="25" y="25" width="50" height="50" rx="8" ry="8" stroke-width="4"/>
+            <path class="stroke" d="M50 10 L50 25 M50 75 L50 90" stroke-width="4" stroke-linecap="round"/>
+            <path class="stroke" d="M50 10 L42 20 M50 10 L58 20" stroke-width="4" stroke-linecap="round"/>
+            <path class="stroke" d="M50 90 L42 80 M50 90 L58 80" stroke-width="4" stroke-linecap="round"/>
+        </svg>
+    </button>
+    <button id="reset-layout-button" class="toolbar-button" title="Reset Layout">
+        <svg class="toolbar-icon" viewBox="0 0 100 100">
+            <path class="border" d="M50 20 A30 30 0 1 1 20 50" stroke-width="8" stroke-linecap="round" fill="none" stroke="#fff"/>
+            <path class="border" d="M50 20 L40 12 M50 20 L58 12" stroke-width="8" stroke-linecap="round" stroke="#fff"/>
+            <path class="stroke" d="M50 20 A30 30 0 1 1 20 50" stroke-width="4" stroke-linecap="round" fill="none"/>
+            <path class="stroke" d="M50 20 L40 12 M50 20 L58 12" stroke-width="4" stroke-linecap="round"/>
+        </svg>
+    </button>
 </div>
 <div id="logo" class="center logo">
     <a href="https://github.com/lutzroeder/netron" target="blank_">

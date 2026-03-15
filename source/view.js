@@ -54,6 +54,17 @@ view.View = class {
             this._element('zoom-out-button').addEventListener('click', () => {
                 this.zoomOut();
             });
+            this._element('canvas-drag-button').addEventListener('click', () => {
+                this._setDragMode('canvas');
+            });
+            this._element('node-drag-button').addEventListener('click', () => {
+                this._setDragMode('node');
+            });
+            this._element('reset-layout-button').addEventListener('click', () => {
+                if (this._target) {
+                    this._target._resetLayout();
+                }
+            });
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
                 await this.popTarget();
             });
@@ -431,6 +442,22 @@ view.View = class {
 
     resetZoom() {
         this._target.zoom = 1;
+    }
+
+    _setDragMode(mode) {
+        const canvasBtn = this._element('canvas-drag-button');
+        const nodeBtn = this._element('node-drag-button');
+        canvasBtn.classList.toggle('active', mode === 'canvas');
+        nodeBtn.classList.toggle('active', mode === 'node');
+        if (this._target) {
+            this._target._clearDragSelection();
+            this._target._dragMode = mode;
+            if (mode === 'node') {
+                this._target._showEdgeControlPoints();
+            } else {
+                this._target._hideEdgeControlPoints();
+            }
+        }
     }
 
     async refresh(anchor) {
@@ -1851,6 +1878,10 @@ view.Graph = class extends grapher.Graph {
         this.blocks = new Set();
         this._zoom = 1;
         this._listeners = {};
+        this._dragMode = 'canvas';
+        this._originalPositions = null;
+        this._dragSelectedNodes = new Set();
+        this._dragSelectedCPs = [];
     }
 
     on(event, callback) {
@@ -2571,6 +2602,23 @@ view.Graph = class extends grapher.Graph {
                 return;
             }
         }
+        // Node drag mode: check if click is on a graph node or control point
+        if (this._dragMode === 'node') {
+            // Check control points first (they're on top)
+            const cpElement = e.target.closest('.edge-control-point');
+            if (cpElement) {
+                return; // Handled by control point's own pointerdown
+            }
+            const nodeElement = e.target.closest('.graph-node, .graph-input, .graph-output');
+            if (nodeElement) {
+                this._nodePointerDownHandler(e, nodeElement);
+                return;
+            }
+            // Empty space click in node mode -> box selection
+            this._boxSelectPointerDown(e);
+            return;
+        }
+        // Canvas drag mode (default behavior)
         const document = this.host.document;
         const container = document.getElementById('target');
         e.target.setPointerCapture(e.pointerId);
@@ -2612,6 +2660,718 @@ view.Graph = class extends grapher.Graph {
                 e.stopImmediatePropagation();
                 delete this._mousePosition;
                 document.addEventListener('click', clickHandler, true);
+            }
+        };
+        container.addEventListener('pointermove', pointerMoveHandler);
+        container.addEventListener('pointerup', pointerUpHandler);
+    }
+
+    _nodePointerDownHandler(e, nodeElement) {
+        this._ensureOriginalsSaved();
+        // Find which graph node this element belongs to
+        let targetNode = null;
+        let targetKey = null;
+        for (const [key, entry] of this.nodes) {
+            if (this.children(key).length === 0) {
+                const node = entry.label;
+                if (node.element === nodeElement) {
+                    targetNode = node;
+                    targetKey = key;
+                    break;
+                }
+            }
+        }
+        if (!targetNode) {
+            return;
+        }
+        // Shift+click: toggle selection
+        if (e.shiftKey) {
+            if (this._dragSelectedNodes.has(targetKey)) {
+                this._dragSelectedNodes.delete(targetKey);
+            } else {
+                this._dragSelectedNodes.add(targetKey);
+            }
+            this._updateDragSelectionVisuals();
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return;
+        }
+        // If clicking a non-selected node without shift, clear selection and select only this
+        if (!this._dragSelectedNodes.has(targetKey)) {
+            this._clearDragSelection();
+            this._dragSelectedNodes.add(targetKey);
+            this._updateDragSelectionVisuals();
+        }
+        // Group drag: collect all selected items' original positions
+        const groupNodes = [];
+        for (const key of this._dragSelectedNodes) {
+            const entry = this.node(key);
+            if (entry && this.children(key).length === 0) {
+                groupNodes.push({ key, node: entry.label, origX: entry.label.x, origY: entry.label.y });
+            }
+        }
+        const groupCPs = [];
+        for (const cp of this._dragSelectedCPs) {
+            const pt = cp.edge.label.points[cp.pointIndex];
+            if (pt) {
+                groupCPs.push({ ...cp, origX: pt.x, origY: pt.y });
+            }
+        }
+        const document = this.host.document;
+        const container = document.getElementById('target');
+        e.target.setPointerCapture(e.pointerId);
+        const zoom = this._zoom;
+        const startX = e.clientX;
+        const startY = e.clientY;
+        nodeElement.style.cursor = 'grabbing';
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const pointerMoveHandler = (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            const dx = (e.clientX - startX) / zoom;
+            const dy = (e.clientY - startY) / zoom;
+            // Move all selected nodes
+            const movedEdges = new Set();
+            for (const gn of groupNodes) {
+                gn.node.x = gn.origX + dx;
+                gn.node.y = gn.origY + dy;
+                gn.node.element.setAttribute('transform', `translate(${gn.node.x - (gn.node.width / 2)},${gn.node.y - (gn.node.height / 2)})`);
+                for (const edge of this.edges.values()) {
+                    if (edge.v === gn.key || edge.w === gn.key) {
+                        movedEdges.add(edge);
+                    }
+                }
+            }
+            // Move all selected control points
+            for (const gcp of groupCPs) {
+                const pt = gcp.edge.label.points[gcp.pointIndex];
+                if (pt) {
+                    pt.x = gcp.origX + dx;
+                    pt.y = gcp.origY + dy;
+                }
+                movedEdges.add(gcp.edge);
+            }
+            // Update all affected edges
+            for (const edge of movedEdges) {
+                edge.label.update();
+                this._updateEdgeControlPointPositions(edge);
+            }
+        };
+        const clickHandler = (e) => {
+            e.stopPropagation();
+            document.removeEventListener('click', clickHandler, true);
+        };
+        const pointerUpHandler = (e) => {
+            e.target.releasePointerCapture(e.pointerId);
+            nodeElement.style.removeProperty('cursor');
+            container.removeEventListener('pointerup', pointerUpHandler);
+            container.removeEventListener('pointermove', pointerMoveHandler);
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            document.addEventListener('click', clickHandler, true);
+        };
+        container.addEventListener('pointermove', pointerMoveHandler);
+        container.addEventListener('pointerup', pointerUpHandler);
+    }
+
+    _boxSelectPointerDown(e) {
+        if (e.pointerType === 'touch' || e.buttons !== 1) {
+            return;
+        }
+        const document = this.host.document;
+        const container = document.getElementById('target');
+        const canvas = document.getElementById('canvas');
+        const origin = document.getElementById('origin');
+        e.target.setPointerCapture(e.pointerId);
+        // Use origin's CTM since the rect is appended to origin
+        const ctm = origin.getScreenCTM();
+        if (!ctm) {
+            return;
+        }
+        const pt = canvas.createSVGPoint();
+        pt.x = e.clientX;
+        pt.y = e.clientY;
+        const startSvg = pt.matrixTransform(ctm.inverse());
+        // Create selection rectangle
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('class', 'drag-select-rect');
+        rect.style.fill = 'rgba(74, 144, 217, 0.15)';
+        rect.style.stroke = 'rgba(74, 144, 217, 0.6)';
+        rect.style.strokeWidth = '1';
+        rect.style.strokeDasharray = '4 2';
+        rect.style.pointerEvents = 'none';
+        origin.appendChild(rect);
+        // If not holding shift, clear existing selection
+        if (!e.shiftKey) {
+            this._clearDragSelection();
+        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        let moved = false;
+        const pointerMoveHandler = (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            moved = true;
+            const pt2 = canvas.createSVGPoint();
+            pt2.x = e.clientX;
+            pt2.y = e.clientY;
+            const curSvg = pt2.matrixTransform(ctm.inverse());
+            const x = Math.min(startSvg.x, curSvg.x);
+            const y = Math.min(startSvg.y, curSvg.y);
+            const w = Math.abs(curSvg.x - startSvg.x);
+            const h = Math.abs(curSvg.y - startSvg.y);
+            rect.setAttribute('x', x);
+            rect.setAttribute('y', y);
+            rect.setAttribute('width', w);
+            rect.setAttribute('height', h);
+        };
+        const pointerUpHandler = (e) => {
+            e.target.releasePointerCapture(e.pointerId);
+            container.removeEventListener('pointerup', pointerUpHandler);
+            container.removeEventListener('pointermove', pointerMoveHandler);
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            if (moved) {
+                // Get selection rect bounds
+                const rx = parseFloat(rect.getAttribute('x')) || 0;
+                const ry = parseFloat(rect.getAttribute('y')) || 0;
+                const rw = parseFloat(rect.getAttribute('width')) || 0;
+                const rh = parseFloat(rect.getAttribute('height')) || 0;
+                // Select nodes within rect
+                for (const [key, entry] of this.nodes) {
+                    if (this.children(key).length === 0) {
+                        const node = entry.label;
+                        if (node.x >= rx && node.x <= rx + rw && node.y >= ry && node.y <= ry + rh) {
+                            this._dragSelectedNodes.add(key);
+                        }
+                    }
+                }
+                // Select control points within rect
+                if (this._controlPointElements) {
+                    for (const cp of this._controlPointElements) {
+                        const pt = cp.edge.label.points[cp.pointIndex];
+                        if (pt && pt.x >= rx && pt.x <= rx + rw && pt.y >= ry && pt.y <= ry + rh) {
+                            const alreadySelected = this._dragSelectedCPs.some(
+                                (c) => c.edge === cp.edge && c.pointIndex === cp.pointIndex
+                            );
+                            if (!alreadySelected) {
+                                this._dragSelectedCPs.push({ edge: cp.edge, pointIndex: cp.pointIndex, circle: cp.circle });
+                            }
+                        }
+                    }
+                }
+                this._updateDragSelectionVisuals();
+            } else if (!e.shiftKey) {
+                // Click on empty space without shift -> clear selection
+                this._clearDragSelection();
+            }
+            rect.remove();
+        };
+        container.addEventListener('pointermove', pointerMoveHandler);
+        container.addEventListener('pointerup', pointerUpHandler);
+    }
+
+    _clearDragSelection() {
+        // Restore node visuals
+        for (const key of this._dragSelectedNodes) {
+            const entry = this.node(key);
+            if (entry && this.children(key).length === 0) {
+                entry.label.element.style.removeProperty('opacity');
+                entry.label.element.style.removeProperty('filter');
+            }
+        }
+        this._dragSelectedNodes.clear();
+        // Restore control point visuals
+        for (const cp of this._dragSelectedCPs) {
+            if (cp.circle) {
+                cp.circle.style.fill = '#4a90d9';
+                cp.circle.style.stroke = '#ffffff';
+                cp.circle.setAttribute('r', 5);
+            }
+        }
+        this._dragSelectedCPs = [];
+    }
+
+    _updateDragSelectionVisuals() {
+        // Update node visuals
+        for (const [key, entry] of this.nodes) {
+            if (this.children(key).length === 0) {
+                const node = entry.label;
+                if (this._dragSelectedNodes.has(key)) {
+                    node.element.style.opacity = '0.7';
+                    node.element.style.filter = 'brightness(0.85) saturate(1.3)';
+                } else {
+                    node.element.style.removeProperty('opacity');
+                    node.element.style.removeProperty('filter');
+                }
+            }
+        }
+        // Update control point visuals
+        if (this._controlPointElements) {
+            for (const cp of this._controlPointElements) {
+                const isSelected = this._dragSelectedCPs.some(
+                    (c) => c.edge === cp.edge && c.pointIndex === cp.pointIndex
+                );
+                if (isSelected) {
+                    cp.circle.style.fill = '#2c6fad';
+                    cp.circle.style.stroke = '#ffffff';
+                    cp.circle.setAttribute('r', 7);
+                } else {
+                    cp.circle.style.fill = '#4a90d9';
+                    cp.circle.style.stroke = '#ffffff';
+                    cp.circle.setAttribute('r', 5);
+                }
+            }
+        }
+    }
+
+    _resetLayout() {
+        this._clearDragSelection();
+        if (this._originalPositions) {
+            for (const [key, pos] of this._originalPositions) {
+                const entry = this.node(key);
+                if (entry) {
+                    const node = entry.label;
+                    node.x = pos.x;
+                    node.y = pos.y;
+                    node.element.setAttribute('transform', `translate(${node.x - (node.width / 2)},${node.y - (node.height / 2)})`);
+                }
+            }
+            // Restore original edge points
+            if (this._originalEdgePoints) {
+                for (const [key, points] of this._originalEdgePoints) {
+                    const edge = this.edges.get(key);
+                    if (edge) {
+                        edge.label.points = points.map((p) => ({ x: p.x, y: p.y }));
+                    }
+                }
+                this._originalEdgePoints = null;
+            }
+            // Re-render all edges
+            for (const edge of this.edges.values()) {
+                edge.label.update();
+            }
+            this._originalPositions = null;
+            // Refresh control points if still in node drag mode
+            if (this._dragMode === 'node') {
+                this._hideEdgeControlPoints();
+                this._showEdgeControlPoints();
+            }
+        }
+    }
+
+    _showEdgeControlPoints() {
+        if (this._controlPointElements) {
+            return;
+        }
+        this._controlPointElements = [];
+        const document = this.host.document;
+        const origin = document.getElementById('origin');
+        // Create a group for control points, placed on top of everything
+        this._controlPointGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        this._controlPointGroup.setAttribute('class', 'edge-control-points');
+        origin.appendChild(this._controlPointGroup);
+        for (const edge of this.edges.values()) {
+            this._createControlPointsForEdge(edge);
+        }
+        // Add hover ghost points on edge paths
+        this._setupEdgeHoverGhosts();
+    }
+
+    _createControlPointsForEdge(edge) {
+        const document = this.host.document;
+        const label = edge.label;
+        if (!label.points || label._tunnel) {
+            return;
+        }
+        const points = label.points;
+        for (let i = 1; i < points.length - 1; i++) {
+            const point = points[i];
+            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle.setAttribute('cx', point.x);
+            circle.setAttribute('cy', point.y);
+            circle.setAttribute('r', 5);
+            circle.setAttribute('class', 'edge-control-point');
+            circle.style.fill = '#4a90d9';
+            circle.style.stroke = '#ffffff';
+            circle.style.strokeWidth = '2';
+            circle.style.cursor = 'grab';
+            circle.style.opacity = '0.8';
+            this._controlPointGroup.appendChild(circle);
+            this._controlPointElements.push({ circle, edge, pointIndex: i });
+            circle.addEventListener('pointerdown', (e) => {
+                this._controlPointPointerDown(e, circle, edge, i);
+            });
+        }
+    }
+
+    _hideEdgeControlPoints() {
+        if (this._controlPointGroup) {
+            this._controlPointGroup.remove();
+            this._controlPointGroup = null;
+        }
+        this._controlPointElements = null;
+        this._removeEdgeHoverGhosts();
+    }
+
+    _refreshEdgeControlPoints() {
+        this._hideEdgeControlPoints();
+        this._controlPointElements = [];
+        const document = this.host.document;
+        const origin = document.getElementById('origin');
+        this._controlPointGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        this._controlPointGroup.setAttribute('class', 'edge-control-points');
+        origin.appendChild(this._controlPointGroup);
+        for (const edge of this.edges.values()) {
+            this._createControlPointsForEdge(edge);
+        }
+        this._setupEdgeHoverGhosts();
+    }
+
+    _updateEdgeControlPointPositions(edge) {
+        if (!this._controlPointElements) {
+            return;
+        }
+        for (const cp of this._controlPointElements) {
+            if (cp.edge === edge) {
+                const point = edge.label.points[cp.pointIndex];
+                if (point) {
+                    cp.circle.setAttribute('cx', point.x);
+                    cp.circle.setAttribute('cy', point.y);
+                }
+            }
+        }
+    }
+
+    _setupEdgeHoverGhosts() {
+        this._removeEdgeHoverGhosts();
+        this._ghostState = {};
+        const document = this.host.document;
+        this._ghostCircle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        this._ghostCircle.setAttribute('r', 4);
+        this._ghostCircle.style.fill = '#4a90d9';
+        this._ghostCircle.style.stroke = '#ffffff';
+        this._ghostCircle.style.strokeWidth = '1.5';
+        this._ghostCircle.style.opacity = '0';
+        this._ghostCircle.style.pointerEvents = 'none';
+        this._ghostCircle.style.transition = 'opacity 0.15s';
+        this._controlPointGroup.appendChild(this._ghostCircle);
+        this._ghostHoverHandler = (e) => this._onEdgeHover(e);
+        this._ghostLeaveHandler = () => this._onEdgeLeave();
+        this._ghostClickHandler = (e) => this._onGhostClick(e);
+        const hitTestGroup = document.querySelector('.edge-paths-hit-test');
+        if (hitTestGroup) {
+            hitTestGroup.addEventListener('pointermove', this._ghostHoverHandler);
+            hitTestGroup.addEventListener('pointerleave', this._ghostLeaveHandler);
+            hitTestGroup.addEventListener('click', this._ghostClickHandler);
+        }
+        const edgePathGroup = document.querySelector('.edge-paths');
+        if (edgePathGroup) {
+            edgePathGroup.addEventListener('pointermove', this._ghostHoverHandler);
+            edgePathGroup.addEventListener('pointerleave', this._ghostLeaveHandler);
+            edgePathGroup.addEventListener('click', this._ghostClickHandler);
+        }
+    }
+
+    _removeEdgeHoverGhosts() {
+        if (this._ghostCircle) {
+            this._ghostCircle.remove();
+            this._ghostCircle = null;
+        }
+        if (this._deleteIndicator) {
+            this._deleteIndicator.remove();
+            this._deleteIndicator = null;
+        }
+        const document = this.host.document;
+        const hitTestGroup = document.querySelector('.edge-paths-hit-test');
+        if (hitTestGroup && this._ghostHoverHandler) {
+            hitTestGroup.removeEventListener('pointermove', this._ghostHoverHandler);
+            hitTestGroup.removeEventListener('pointerleave', this._ghostLeaveHandler);
+            hitTestGroup.removeEventListener('click', this._ghostClickHandler);
+        }
+        const edgePathGroup = document.querySelector('.edge-paths');
+        if (edgePathGroup && this._ghostHoverHandler) {
+            edgePathGroup.removeEventListener('pointermove', this._ghostHoverHandler);
+            edgePathGroup.removeEventListener('pointerleave', this._ghostLeaveHandler);
+            edgePathGroup.removeEventListener('click', this._ghostClickHandler);
+        }
+        this._ghostHoverHandler = null;
+        this._ghostLeaveHandler = null;
+        this._ghostClickHandler = null;
+        this._ghostState = null;
+    }
+
+    _onEdgeHover(e) {
+        if (!this._ghostCircle || !this._controlPointGroup || this._dragMode !== 'node') {
+            return;
+        }
+        const canvas = this.host.document.getElementById('canvas');
+        const pt = canvas.createSVGPoint();
+        pt.x = e.clientX;
+        pt.y = e.clientY;
+        const ctm = this._controlPointGroup.getScreenCTM();
+        if (!ctm) {
+            return;
+        }
+        const svgPt = pt.matrixTransform(ctm.inverse());
+        const curX = svgPt.x;
+        const curY = svgPt.y;
+        let bestEdge = null;
+        let bestSegIdx = -1;
+        let bestDist = 20;
+        let bestProjX = 0;
+        let bestProjY = 0;
+        for (const edge of this.edges.values()) {
+            const label = edge.label;
+            if (!label.points || label._tunnel || label.points.length < 2) {
+                continue;
+            }
+            const points = label.points;
+            for (let i = 0; i < points.length - 1; i++) {
+                const p1 = points[i];
+                const p2 = points[i + 1];
+                const dx = p2.x - p1.x;
+                const dy = p2.y - p1.y;
+                const lenSq = dx * dx + dy * dy;
+                if (lenSq === 0) {
+                    continue;
+                }
+                let t = ((curX - p1.x) * dx + (curY - p1.y) * dy) / lenSq;
+                t = Math.max(0.1, Math.min(0.9, t));
+                const projX = p1.x + t * dx;
+                const projY = p1.y + t * dy;
+                const dist = Math.sqrt((curX - projX) * (curX - projX) + (curY - projY) * (curY - projY));
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestEdge = edge;
+                    bestSegIdx = i;
+                    bestProjX = projX;
+                    bestProjY = projY;
+                }
+            }
+        }
+        if (bestEdge) {
+            this._ghostCircle.setAttribute('cx', bestProjX);
+            this._ghostCircle.setAttribute('cy', bestProjY);
+            this._ghostCircle.style.opacity = '0.4';
+            this._ghostState = { edge: bestEdge, segmentIndex: bestSegIdx, x: bestProjX, y: bestProjY };
+        } else {
+            this._ghostCircle.style.opacity = '0';
+            this._ghostState = {};
+        }
+    }
+
+    _onEdgeLeave() {
+        if (this._ghostCircle) {
+            this._ghostCircle.style.opacity = '0';
+        }
+        this._ghostState = {};
+    }
+
+    _onGhostClick(e) {
+        if (!this._ghostState || !this._ghostState.edge || this._dragMode !== 'node') {
+            return;
+        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const { edge, segmentIndex, x, y } = this._ghostState;
+        this._ensureOriginalsSaved();
+        const insertIdx = segmentIndex + 1;
+        edge.label.points.splice(insertIdx, 0, { x, y });
+        edge.label.update();
+        this._refreshEdgeControlPoints();
+    }
+
+    _ensureOriginalsSaved() {
+        if (!this._originalPositions) {
+            this._originalPositions = new Map();
+            for (const [key, entry] of this.nodes) {
+                if (this.children(key).length === 0) {
+                    const node = entry.label;
+                    this._originalPositions.set(key, { x: node.x, y: node.y });
+                }
+            }
+        }
+        if (!this._originalEdgePoints) {
+            this._originalEdgePoints = new Map();
+            for (const [key, edgeEntry] of this.edges) {
+                if (edgeEntry.label.points) {
+                    this._originalEdgePoints.set(key, edgeEntry.label.points.map((p) => ({ x: p.x, y: p.y })));
+                }
+            }
+        }
+    }
+
+    _getOrCreateDeleteIndicator() {
+        if (!this._deleteIndicator) {
+            const document = this.host.document;
+            this._deleteIndicator = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            this._deleteIndicator.style.pointerEvents = 'none';
+            this._deleteIndicator.style.opacity = '0';
+            this._deleteIndicator.style.transition = 'opacity 0.1s';
+            const bg = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            bg.setAttribute('r', 8);
+            bg.style.fill = '#e74c3c';
+            bg.style.stroke = '#ffffff';
+            bg.style.strokeWidth = '1.5';
+            this._deleteIndicator.appendChild(bg);
+            const line1 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line1.setAttribute('x1', '-4'); line1.setAttribute('y1', '-4');
+            line1.setAttribute('x2', '4'); line1.setAttribute('y2', '4');
+            line1.style.stroke = '#ffffff';
+            line1.style.strokeWidth = '2';
+            line1.style.strokeLinecap = 'round';
+            this._deleteIndicator.appendChild(line1);
+            const line2 = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line2.setAttribute('x1', '4'); line2.setAttribute('y1', '-4');
+            line2.setAttribute('x2', '-4'); line2.setAttribute('y2', '4');
+            line2.style.stroke = '#ffffff';
+            line2.style.strokeWidth = '2';
+            line2.style.strokeLinecap = 'round';
+            this._deleteIndicator.appendChild(line2);
+            this._controlPointGroup.appendChild(this._deleteIndicator);
+        }
+        return this._deleteIndicator;
+    }
+
+    _controlPointPointerDown(e, circle, edge, pointIndex) {
+        if (e.pointerType !== 'touch' && e.buttons !== 1) {
+            return;
+        }
+        this._ensureOriginalsSaved();
+        // Shift+click: toggle control point selection
+        if (e.shiftKey) {
+            const idx = this._dragSelectedCPs.findIndex((c) => c.edge === edge && c.pointIndex === pointIndex);
+            if (idx >= 0) {
+                this._dragSelectedCPs.splice(idx, 1);
+            } else {
+                this._dragSelectedCPs.push({ edge, pointIndex, circle });
+            }
+            this._updateDragSelectionVisuals();
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            return;
+        }
+        // If this CP is not selected, clear selection and select only it
+        const isSelected = this._dragSelectedCPs.some((c) => c.edge === edge && c.pointIndex === pointIndex);
+        if (!isSelected) {
+            this._clearDragSelection();
+            this._dragSelectedCPs.push({ edge, pointIndex, circle });
+            this._updateDragSelectionVisuals();
+        }
+        // Group drag: collect all selected items' original positions
+        const groupNodes = [];
+        for (const key of this._dragSelectedNodes) {
+            const entry = this.node(key);
+            if (entry && this.children(key).length === 0) {
+                groupNodes.push({ key, node: entry.label, origX: entry.label.x, origY: entry.label.y });
+            }
+        }
+        const groupCPs = [];
+        for (const cp of this._dragSelectedCPs) {
+            const pt = cp.edge.label.points[cp.pointIndex];
+            if (pt) {
+                groupCPs.push({ ...cp, origX: pt.x, origY: pt.y });
+            }
+        }
+        const document = this.host.document;
+        const container = document.getElementById('target');
+        e.target.setPointerCapture(e.pointerId);
+        const zoom = this._zoom;
+        const startX = e.clientX;
+        const startY = e.clientY;
+        const origPointX = edge.label.points[pointIndex].x;
+        const origPointY = edge.label.points[pointIndex].y;
+        const mergeThreshold = 12;
+        let nearMerge = false;
+        circle.style.cursor = 'grabbing';
+        circle.style.opacity = '1';
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        // Only show merge indicator if dragging a single control point
+        const isSingleCP = this._dragSelectedCPs.length <= 1 && this._dragSelectedNodes.size === 0;
+        const deleteIndicator = isSingleCP ? this._getOrCreateDeleteIndicator() : null;
+        const pointerMoveHandler = (e) => {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            const dx = (e.clientX - startX) / zoom;
+            const dy = (e.clientY - startY) / zoom;
+            // Move all selected nodes
+            const movedEdges = new Set();
+            for (const gn of groupNodes) {
+                gn.node.x = gn.origX + dx;
+                gn.node.y = gn.origY + dy;
+                gn.node.element.setAttribute('transform', `translate(${gn.node.x - (gn.node.width / 2)},${gn.node.y - (gn.node.height / 2)})`);
+                for (const edgeVal of this.edges.values()) {
+                    if (edgeVal.v === gn.key || edgeVal.w === gn.key) {
+                        movedEdges.add(edgeVal);
+                    }
+                }
+            }
+            // Move all selected control points
+            for (const gcp of groupCPs) {
+                const pt = gcp.edge.label.points[gcp.pointIndex];
+                if (pt) {
+                    pt.x = gcp.origX + dx;
+                    pt.y = gcp.origY + dy;
+                }
+                movedEdges.add(gcp.edge);
+            }
+            // Update all affected edges
+            for (const me of movedEdges) {
+                me.label.update();
+                this._updateEdgeControlPointPositions(me);
+            }
+            // Merge indicator for single CP drag
+            if (isSingleCP && deleteIndicator) {
+                const points = edge.label.points;
+                const curPt = points[pointIndex];
+                nearMerge = false;
+                for (let j = 1; j < points.length - 1; j++) {
+                    if (j === pointIndex) {
+                        continue;
+                    }
+                    const other = points[j];
+                    const dist = Math.sqrt((curPt.x - other.x) * (curPt.x - other.x) + (curPt.y - other.y) * (curPt.y - other.y));
+                    if (dist < mergeThreshold) {
+                        nearMerge = true;
+                        deleteIndicator.setAttribute('transform', `translate(${curPt.x + 12},${curPt.y - 12})`);
+                        deleteIndicator.style.opacity = '1';
+                        circle.style.fill = '#e74c3c';
+                        break;
+                    }
+                }
+                if (!nearMerge) {
+                    deleteIndicator.style.opacity = '0';
+                    circle.style.fill = '#4a90d9';
+                }
+            }
+        };
+        const clickHandler = (e) => {
+            e.stopPropagation();
+            document.removeEventListener('click', clickHandler, true);
+        };
+        const pointerUpHandler = (e) => {
+            e.target.releasePointerCapture(e.pointerId);
+            circle.style.cursor = 'grab';
+            circle.style.opacity = '0.8';
+            circle.style.fill = '#4a90d9';
+            if (deleteIndicator) {
+                deleteIndicator.style.opacity = '0';
+            }
+            container.removeEventListener('pointerup', pointerUpHandler);
+            container.removeEventListener('pointermove', pointerMoveHandler);
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            document.addEventListener('click', clickHandler, true);
+            if (nearMerge && isSingleCP) {
+                const points = edge.label.points;
+                if (points.length > 2) {
+                    points.splice(pointIndex, 1);
+                    edge.label.update();
+                    this._refreshEdgeControlPoints();
+                }
             }
         };
         container.addEventListener('pointermove', pointerMoveHandler);
