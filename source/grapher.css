@@ -155,4 +155,4 @@
 
     .edge-path-tunnel { stroke: #888; }
     #arrowhead-tunnel { fill: #888; }
-}
+}.custom-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "PingFang SC"; font-size: 14px; fill: #000; cursor: grab; }

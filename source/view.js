@@ -65,6 +65,26 @@ view.View = class {
                     this._target._resetLayout();
                 }
             });
+            this._element('edit-bounds-button').addEventListener('click', () => {
+                if (this._target) {
+                    const margin = window.prompt('Enter canvas padding/margin (current: ' + (this._target._canvasMargin || 100) + '):', this._target._canvasMargin || 100);
+                    if (margin !== null) {
+                        const parsed = parseInt(margin, 10);
+                        if (!isNaN(parsed) && parsed >= 0) {
+                            this._target._canvasMargin = parsed;
+                            this._target.updateCanvasBounds();
+                        }
+                    }
+                }
+            });
+            this._element('add-text-button').addEventListener('click', () => {
+                if (this._target) {
+                    const text = window.prompt('Enter text annotation:', '');
+                    if (text) {
+                        this._target.addCustomText(text);
+                    }
+                }
+            });
             this._element('toolbar-path-back-button').addEventListener('click', async () => {
                 await this.popTarget();
             });
@@ -1882,6 +1902,9 @@ view.Graph = class extends grapher.Graph {
         this._originalPositions = null;
         this._dragSelectedNodes = new Set();
         this._dragSelectedCPs = [];
+        this._customTexts = [];
+        this._dragSelectedTexts = [];
+        this._canvasMargin = 100;
     }
 
     on(event, callback) {
@@ -2459,6 +2482,60 @@ view.Graph = class extends grapher.Graph {
         }
     }
 
+    updateCanvasBounds() {
+        const document = this.host.document;
+        const canvas = document.getElementById('canvas');
+        const origin = document.getElementById('origin');
+        const background = document.getElementById('background');
+        const size = canvas.getBBox();
+        const margin = this._canvasMargin || 100;
+        const width = Math.ceil(margin + size.width + margin);
+        const height = Math.ceil(margin + size.height + margin);
+        origin.setAttribute('transform', `translate(${margin - size.x}, ${margin - size.y}) scale(1)`);
+        background.setAttribute('width', width);
+        background.setAttribute('height', height);
+        this._width = width;
+        this._height = height;
+        canvas.setAttribute('viewBox', `0 0 ${width} ${height}`);
+        canvas.setAttribute('width', width);
+        canvas.setAttribute('height', height);
+        this._updateZoom(this._zoom);
+    }
+
+    addCustomText(text) {
+        const document = this.host.document;
+        const origin = document.getElementById('origin');
+        let annotationsGroup = document.getElementById('annotations');
+        if (!annotationsGroup) {
+            annotationsGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+            annotationsGroup.setAttribute('id', 'annotations');
+            origin.appendChild(annotationsGroup);
+        }
+        const textElement = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        textElement.setAttribute('class', 'custom-text');
+        textElement.textContent = text;
+        const container = document.getElementById('target');
+        const scrollLeft = this._scrollLeft || container.scrollLeft;
+        const scrollTop = this._scrollTop || container.scrollTop;
+        const ctm = origin.getScreenCTM();
+        const pt = document.getElementById('canvas').createSVGPoint();
+        pt.x = container.clientWidth / 2;
+        pt.y = container.clientHeight / 2;
+        let x = 0; let y = 0;
+        if (ctm) {
+            const svgPt = pt.matrixTransform(ctm.inverse());
+            x = svgPt.x;
+            y = svgPt.y;
+        }
+        textElement.setAttribute('x', x);
+        textElement.setAttribute('y', y);
+        annotationsGroup.appendChild(textElement);
+        
+        const id = 'custom-text-' + Date.now();
+        textElement.setAttribute('id', id);
+        this._customTexts.push({ id, element: textElement, text: text, x, y });
+    }
+
     restore(state) {
         const document = this.host.document;
         const canvas = document.getElementById('canvas');
@@ -2472,7 +2549,7 @@ view.Graph = class extends grapher.Graph {
             }
         }
         const size = canvas.getBBox();
-        const margin = 100;
+        const margin = this._canvasMargin || 100;
         const width = Math.ceil(margin + size.width + margin);
         const height = Math.ceil(margin + size.height + margin);
         origin.setAttribute('transform', `translate(${margin - size.x}, ${margin - size.y}) scale(1)`);
@@ -2609,7 +2686,7 @@ view.Graph = class extends grapher.Graph {
             if (cpElement) {
                 return; // Handled by control point's own pointerdown
             }
-            const nodeElement = e.target.closest('.graph-node, .graph-input, .graph-output');
+            const nodeElement = e.target.closest('.graph-node, .graph-input, .graph-output, .edge-label, .custom-text');
             if (nodeElement) {
                 this._nodePointerDownHandler(e, nodeElement);
                 return;
@@ -2668,28 +2745,56 @@ view.Graph = class extends grapher.Graph {
 
     _nodePointerDownHandler(e, nodeElement) {
         this._ensureOriginalsSaved();
-        // Find which graph node this element belongs to
-        let targetNode = null;
+        // Find which graph node or text element this belongs to
+        let targetItem = null;
         let targetKey = null;
-        for (const [key, entry] of this.nodes) {
-            if (this.children(key).length === 0) {
-                const node = entry.label;
-                if (node.element === nodeElement) {
-                    targetNode = node;
-                    targetKey = key;
+        let itemType = '';
+        if (nodeElement.classList.contains('graph-node') || nodeElement.classList.contains('graph-input') || nodeElement.classList.contains('graph-output')) {
+            for (const [key, entry] of this.nodes) {
+                if (this.children(key).length === 0) {
+                    const node = entry.label;
+                    if (node.element === nodeElement) {
+                        targetItem = node;
+                        targetKey = key;
+                        itemType = 'node';
+                        break;
+                    }
+                }
+            }
+        } else if (nodeElement.classList.contains('edge-label')) {
+            for (const edge of this.edges.values()) {
+                if (edge.label.labelElement === nodeElement) {
+                    targetItem = edge.label;
+                    targetKey = 'edge-label:' + edge.v + ':' + edge.w + ':' + edge.name;
+                    itemType = 'edge-label';
                     break;
                 }
             }
+        } else if (nodeElement.classList.contains('custom-text')) {
+            targetItem = this._customTexts.find(t => t.element === nodeElement);
+            if (targetItem) {
+                targetKey = targetItem.id;
+                itemType = 'custom-text';
+            }
         }
-        if (!targetNode) {
+        
+        if (!targetItem) {
             return;
         }
         // Shift+click: toggle selection
         if (e.shiftKey) {
-            if (this._dragSelectedNodes.has(targetKey)) {
-                this._dragSelectedNodes.delete(targetKey);
+            if (itemType === 'custom-text' || itemType === 'edge-label') {
+                if (this._dragSelectedTexts.includes(targetItem)) {
+                    this._dragSelectedTexts = this._dragSelectedTexts.filter(t => t !== targetItem);
+                } else {
+                    this._dragSelectedTexts.push({ item: targetItem, type: itemType });
+                }
             } else {
-                this._dragSelectedNodes.add(targetKey);
+                if (this._dragSelectedNodes.has(targetKey)) {
+                    this._dragSelectedNodes.delete(targetKey);
+                } else {
+                    this._dragSelectedNodes.add(targetKey);
+                }
             }
             this._updateDragSelectionVisuals();
             e.preventDefault();
@@ -2697,9 +2802,20 @@ view.Graph = class extends grapher.Graph {
             return;
         }
         // If clicking a non-selected node without shift, clear selection and select only this
-        if (!this._dragSelectedNodes.has(targetKey)) {
+        let isSelected = false;
+        if (itemType === 'custom-text' || itemType === 'edge-label') {
+            isSelected = this._dragSelectedTexts.some(t => t.item === targetItem);
+        } else {
+            isSelected = this._dragSelectedNodes.has(targetKey);
+        }
+        
+        if (!isSelected) {
             this._clearDragSelection();
-            this._dragSelectedNodes.add(targetKey);
+            if (itemType === 'custom-text' || itemType === 'edge-label') {
+                this._dragSelectedTexts.push({ item: targetItem, type: itemType });
+            } else {
+                this._dragSelectedNodes.add(targetKey);
+            }
             this._updateDragSelectionVisuals();
         }
         // Group drag: collect all selected items' original positions
@@ -2709,6 +2825,10 @@ view.Graph = class extends grapher.Graph {
             if (entry && this.children(key).length === 0) {
                 groupNodes.push({ key, node: entry.label, origX: entry.label.x, origY: entry.label.y });
             }
+        }
+        const groupTexts = [];
+        for (const t of this._dragSelectedTexts) {
+            groupTexts.push({ ...t, origX: t.item.x, origY: t.item.y });
         }
         const groupCPs = [];
         for (const cp of this._dragSelectedCPs) {
@@ -2741,6 +2861,19 @@ view.Graph = class extends grapher.Graph {
                     if (edge.v === gn.key || edge.w === gn.key) {
                         movedEdges.add(edge);
                     }
+                }
+            }
+            // Move all selected texts
+            for (const gt of groupTexts) {
+                gt.item.x = gt.origX + dx;
+                gt.item.y = gt.origY + dy;
+                if (gt.type === 'edge-label') {
+                    if (gt.item.labelElement) {
+                        gt.item.labelElement.setAttribute('transform', `translate(${gt.item.x - (gt.item.width / 2)},${gt.item.y - (gt.item.height / 2)})`);
+                    }
+                } else {
+                    gt.item.element.setAttribute('x', gt.item.x);
+                    gt.item.element.setAttribute('y', gt.item.y);
                 }
             }
             // Move all selected control points
@@ -2847,6 +2980,24 @@ view.Graph = class extends grapher.Graph {
                         }
                     }
                 }
+                // Select edge labels within rect
+                for (const edge of this.edges.values()) {
+                    if (edge.label && edge.label.x >= rx && edge.label.x <= rx + rw && edge.label.y >= ry && edge.label.y <= ry + rh) {
+                        const alreadySelected = this._dragSelectedTexts.some(t => t.item === edge.label);
+                        if (!alreadySelected) {
+                            this._dragSelectedTexts.push({ item: edge.label, type: 'edge-label' });
+                        }
+                    }
+                }
+                // Select custom texts within rect
+                for (const ct of this._customTexts) {
+                    if (ct.x >= rx && ct.x <= rx + rw && ct.y >= ry && ct.y <= ry + rh) {
+                        const alreadySelected = this._dragSelectedTexts.some(t => t.item === ct);
+                        if (!alreadySelected) {
+                            this._dragSelectedTexts.push({ item: ct, type: 'custom-text' });
+                        }
+                    }
+                }
                 // Select control points within rect
                 if (this._controlPointElements) {
                     for (const cp of this._controlPointElements) {
@@ -2891,6 +3042,17 @@ view.Graph = class extends grapher.Graph {
             }
         }
         this._dragSelectedCPs = [];
+        // Restore text visuals
+        for (const gt of this._dragSelectedTexts) {
+            if (gt.type === 'edge-label' && gt.item.labelElement) {
+                gt.item.labelElement.style.removeProperty('opacity');
+                gt.item.labelElement.style.removeProperty('filter');
+            } else if (gt.type === 'custom-text' && gt.item.element) {
+                gt.item.element.style.removeProperty('opacity');
+                gt.item.element.style.removeProperty('filter');
+            }
+        }
+        this._dragSelectedTexts = [];
     }
 
     _updateDragSelectionVisuals() {
@@ -2924,6 +3086,16 @@ view.Graph = class extends grapher.Graph {
                 }
             }
         }
+        // Update text visuals
+        for (const gt of this._dragSelectedTexts) {
+            if (gt.type === 'edge-label' && gt.item.labelElement) {
+                gt.item.labelElement.style.opacity = '0.7';
+                gt.item.labelElement.style.filter = 'brightness(0.85) saturate(1.3)';
+            } else if (gt.type === 'custom-text' && gt.item.element) {
+                gt.item.element.style.opacity = '0.7';
+                gt.item.element.style.filter = 'brightness(0.85) saturate(1.3)';
+            }
+        }
     }
 
     _resetLayout() {
@@ -2948,8 +3120,12 @@ view.Graph = class extends grapher.Graph {
                 }
                 this._originalEdgePoints = null;
             }
-            // Re-render all edges
+            // Re-render all edges and reset their label positions
             for (const edge of this.edges.values()) {
+                if ('x' in edge && edge.label) {
+                    edge.label.x = edge.x;
+                    edge.label.y = edge.y;
+                }
                 edge.label.update();
             }
             this._originalPositions = null;

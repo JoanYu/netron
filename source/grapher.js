@@ -947,7 +947,11 @@ grapher.Edge = class {
         this.element.setAttribute('d', edgePath);
         this.hitTest.setAttribute('d', edgePath);
         if (this.labelElement) {
-            this.labelElement.setAttribute('transform', `translate(${this.x - (this.width / 2)},${this.y - (this.height / 2)})`);
+            const lx = this.label.x !== undefined ? this.label.x : this.x;
+            const ly = this.label.y !== undefined ? this.label.y : this.y;
+            const lw = this.label.width !== undefined ? this.label.width : this.width;
+            const lh = this.label.height !== undefined ? this.label.height : this.height;
+            this.labelElement.setAttribute('transform', `translate(${lx - (lw / 2)},${ly - (lh / 2)})`);
             this.labelElement.style.opacity = 1;
         }
     }
